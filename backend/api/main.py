@@ -10,8 +10,24 @@ import functions_framework
 from google.cloud import bigquery
 from google.cloud import storage
 
-# Initialize logging
-logging.basicConfig(level=logging.INFO)
+import google.cloud.logging
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
+
+provider = TracerProvider()
+cloud_trace_exporter = CloudTraceSpanExporter()
+provider.add_span_processor(BatchSpanProcessor(cloud_trace_exporter))
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer(__name__)
+
+try:
+    logging_client = google.cloud.logging.Client()
+    logging_client.setup_logging()
+except Exception:
+    logging.basicConfig(level=logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 # Initialize GCP clients
@@ -52,12 +68,20 @@ def get_jobs(request):
     path = request.path.strip('/')
     parts = path.split('/') if path else []
     
+    # Handle frontend OTLP traces and logs endpoints
+    if len(parts) >= 2 and parts[0] == "v1":
+        if parts[1] == "traces":
+            return (jsonify({"status": "ok"}), 200, headers)
+        elif parts[1] == "logs":
+            return (jsonify({"status": "ok"}), 200, headers)
+
     # If routed through the load balancer, strip the 'api' prefix
     if parts and parts[0] == "api":
         parts = parts[1:]
     
-    # Identify user and role
-    user_email, user_role = get_user_identity(request)
+    with tracer.start_as_current_span(f"/api/{'/'.join(parts)}"):
+        # Identify user and role
+        user_email, user_role = get_user_identity(request)
 
     if request.method == "GET":
         if len(parts) == 1 and parts[0] == "me":
@@ -214,25 +238,35 @@ def get_jobs(request):
                 for exec_name in execution_names:
                     filter_conditions.append(f'labels."run.googleapis.com/execution_name"="{exec_name}"')
                 
-                combined_filter = f'({" OR ".join(filter_conditions)}) AND NOT logName:("run.googleapis.com/requests" OR "cloudaudit.googleapis.com")'
+                combined_filter = f'({" OR ".join(filter_conditions)}) AND NOT log_name:"requests" AND NOT log_name:"cloudaudit"'
                 
                 # 3. Fetch all logs matching combined filter
                 entries = logging_client.list_entries(filter_=combined_filter, order_by=cloud_logging.DESCENDING, max_results=200)
                 
                 logs = []
+                ffmpeg_noise = ("[libx264", "[aac", "Stream #", "Metadata:", "configuration:", "encoder :", "built with gcc")
+                
                 for entry in entries:
-                    if isinstance(entry.payload, str):
-                        msg = entry.payload
-                    elif isinstance(entry.payload, dict):
-                        msg = json.dumps(entry.payload)
-                    elif getattr(entry, 'text_payload', None):
-                        msg = entry.text_payload
-                    elif getattr(entry, 'json_payload', None):
-                        msg = json.dumps(entry.json_payload)
+                    # Skip request/access logs
+                    if entry.log_name and "requests" in entry.log_name:
+                        continue
+                    
+                    msg = None
+                    payload = getattr(entry, 'payload', None) or getattr(entry, 'json_payload', None) or getattr(entry, 'text_payload', None)
+                    
+                    if isinstance(payload, str):
+                        msg = payload
+                    elif isinstance(payload, dict):
+                        msg = payload.get("message") or payload.get("text") or json.dumps(payload)
                     elif getattr(entry, 'message', None):
                         msg = entry.message
-                    else:
-                        msg = str(entry)
+
+                    if not msg:
+                        continue
+
+                    # Suppress low-level FFmpeg internal encoder noise unless severity is ERROR
+                    if entry.severity != "ERROR" and any(pattern in msg for pattern in ffmpeg_noise):
+                        continue
 
                     logs.append({
                         "timestamp": entry.timestamp.isoformat() if entry.timestamp else "",

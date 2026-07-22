@@ -84,7 +84,7 @@ resource "google_compute_url_map" "ui_url_map" {
     default_service = google_compute_backend_service.ui_backend.id
 
     path_rule {
-      paths   = ["/api", "/api/*"]
+      paths   = ["/api", "/api/*", "/v1/traces", "/v1/logs", "/v1/*"]
       service = google_compute_backend_service.api_backend.id
     }
   }
