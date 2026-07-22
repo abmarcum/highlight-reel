@@ -1,0 +1,55 @@
+steps:
+
+
+  # 3. Build UI Container
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/highlight-repo/ui:latest'
+      - './frontend'
+
+  # 4. Push UI Container to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/highlight-repo/ui:latest'
+
+  # 5. Build Renderer Container
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/highlight-repo/renderer:latest'
+      - './backend/renderer'
+
+  # 6. Push Renderer Container
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/highlight-repo/renderer:latest'
+
+  # 7. Deploy UI Container to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'highlight-ui'
+      - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/highlight-repo/ui:latest'
+      - '--region=us-central1'
+      - '--allow-unauthenticated'
+
+  # 8. Update Video Renderer Cloud Run Job
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'video-renderer-job'
+      - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/highlight-repo/renderer:latest'
+      - '--region=us-central1'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

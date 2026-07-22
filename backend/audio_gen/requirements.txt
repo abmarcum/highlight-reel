@@ -1,0 +1,11 @@
+functions-framework>=3.5.0
+cloudevents>=1.10.1
+google-cloud-texttospeech>=2.15.1
+google-cloud-storage>=2.14.0
+google-cloud-pubsub>=2.19.0
+google-cloud-logging>=3.8.0
+google-cloud-bigquery
+google-cloud-run
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-exporter-gcp-trace

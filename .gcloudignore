@@ -1,0 +1,27 @@
+.gcloudignore
+.git
+.gitignore
+
+# Node
+node_modules/
+*/node_modules/
+dist/
+build/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Terraform (Do NOT upload state or secrets to Cloud Build)
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+*.tfvars.json
+.terraform.lock.hcl
+terraform/gcp/*.zip
+
+# Note: We intentionally omit .env exclusions here so that 
+# frontend/.env.production is successfully uploaded and baked into the Vite build.

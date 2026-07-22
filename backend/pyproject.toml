@@ -1,0 +1,27 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "google-cloud-storage>=2.14.0",
+    "google-cloud-pubsub>=2.19.0",
+    "google-cloud-bigquery>=3.15.0",
+    "google-cloud-texttospeech>=2.15.1",
+    "vertexai>=1.38.1",
+    "functions-framework>=3.5.0",
+    "torch>=2.0.0",
+    "transformers>=4.30.0",
+    "Pillow>=10.0.0",
+    "opencv-python-headless>=4.8.0.74",
+    "google-cloud-logging>=3.8.0",
+    "opentelemetry-api",
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-gcp-trace"
+]
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple/"
+default = true

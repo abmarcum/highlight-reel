@@ -1,0 +1,8 @@
+functions-framework>=3.5.0
+cloudevents>=1.10.1
+google-cloud-bigquery>=3.15.0
+requests
+google-cloud-logging>=3.8.0
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-exporter-gcp-trace
