@@ -11,6 +11,7 @@ const JobForm = () => {
     language: 'en',
     tone: 'hype',
     dualVoices: false,
+    enableSubtitles: false,
     musicTrack: 'electronic',
     aspectRatio: '16:9',
     bias: '',
@@ -234,15 +235,15 @@ const JobForm = () => {
   const PRESETS = [
     {
       name: "TikTok Hype Reel (9:16, 30s)",
-      config: { aspectRatio: "9:16", length: "30", tone: "hype", musicTrack: "electronic", analysisMode: "audio", dualVoices: false }
+      config: { aspectRatio: "9:16", length: "30", tone: "hype", musicTrack: "electronic", analysisMode: "audio", dualVoices: false, enableSubtitles: false }
     },
     {
       name: "Tactical Breakdown (16:9, 2m)",
-      config: { aspectRatio: "16:9", length: "120", tone: "analytic", musicTrack: "orchestral", analysisMode: "video", dualVoices: true }
+      config: { aspectRatio: "16:9", length: "120", tone: "analytic", musicTrack: "orchestral", analysisMode: "video", dualVoices: true, enableSubtitles: false }
     },
     {
       name: "Instagram Square (1:1, 1m)",
-      config: { aspectRatio: "1:1", length: "60", tone: "funny", musicTrack: "hiphop", analysisMode: "audio", dualVoices: false }
+      config: { aspectRatio: "1:1", length: "60", tone: "funny", musicTrack: "hiphop", analysisMode: "audio", dualVoices: false, enableSubtitles: false }
     }
   ];
 
@@ -434,9 +435,14 @@ const JobForm = () => {
           <input type="text" id="bias" name="bias" className="form-control" placeholder="e.g. Focus on Stephen Curry" value={formData.bias} onChange={handleChange}/>
         </div>
 
-        <div className="checkbox-group" style={{ marginBottom: '1.5rem' }}>
+        <div className="checkbox-group" style={{ marginBottom: '0.75rem' }}>
           <input type="checkbox" id="dualVoices" name="dualVoices" checked={formData.dualVoices} onChange={handleChange}/>
           <label htmlFor="dualVoices" style={{ margin: 0 }}>Enable Dual Voices (Play-by-play & Color)</label>
+        </div>
+
+        <div className="checkbox-group" style={{ marginBottom: '1.5rem' }}>
+          <input type="checkbox" id="enableSubtitles" name="enableSubtitles" checked={formData.enableSubtitles} onChange={handleChange}/>
+          <label htmlFor="enableSubtitles" style={{ margin: 0 }}>Display Subtitles on Video</label>
         </div>
 
         <button type="submit" className="btn" style={{ width: '100%' }}>Generate Highlight Reel</button>

@@ -8,16 +8,21 @@ from google.cloud import bigquery
 
 import logging
 import google.cloud.logging
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
+try:
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
 
-provider = TracerProvider()
-cloud_trace_exporter = CloudTraceSpanExporter()
-provider.add_span_processor(BatchSpanProcessor(cloud_trace_exporter))
-trace.set_tracer_provider(provider)
-tracer = trace.get_tracer(__name__)
+    provider = TracerProvider()
+    cloud_trace_exporter = CloudTraceSpanExporter()
+    provider.add_span_processor(BatchSpanProcessor(cloud_trace_exporter))
+    trace.set_tracer_provider(provider)
+    tracer = trace.get_tracer(__name__)
+except Exception as otel_err:
+    print(f"OpenTelemetry initialization warning: {otel_err}")
+    from opentelemetry import trace
+    tracer = trace.get_tracer(__name__)
 
 try:
     logging_client = google.cloud.logging.Client()
@@ -91,8 +96,39 @@ def write_error_to_bq(job_id, error_message):
     except Exception as e:
         logger.error(f"Failed to write error to BigQuery: {e}")
 
+import random
+from opentelemetry.trace import SpanContext, TraceFlags
+
+def extract_parent_context(trace_id_str: str, parent_span_id_str: str = None):
+    if trace_id_str and len(trace_id_str) == 32:
+        try:
+            trace_id_int = int(trace_id_str, 16)
+            span_id_int = int(parent_span_id_str, 16) if parent_span_id_str and len(parent_span_id_str) == 16 else random.getrandbits(64)
+            span_context = SpanContext(
+                trace_id=trace_id_int,
+                span_id=span_id_int,
+                is_remote=True,
+                trace_flags=TraceFlags(0x01)
+            )
+            return trace.set_span_in_context(trace.NonRecordingSpan(span_context))
+        except Exception:
+            pass
+    return None
+
 def main():
-    with tracer.start_as_current_span("renderer-process") as span:
+    job_payload_str = os.environ.get('JOB_PAYLOAD')
+    trace_id = None
+    span_id = None
+    if job_payload_str:
+        try:
+            p_json = json.loads(job_payload_str)
+            trace_id = p_json.get("trace_id")
+            span_id = p_json.get("span_id")
+        except Exception:
+            pass
+
+    parent_ctx = extract_parent_context(trace_id, span_id)
+    with tracer.start_as_current_span("renderer-process", context=parent_ctx) as span:
         return _main(span)
 
 def _main(span):
@@ -183,19 +219,7 @@ def _main(span):
 
     storage_client = storage.Client()
     
-    # Prefer token-optimized compressed video if it exists in temp-processing bucket
-    try:
-        temp_bucket_name = f"{project_id}-temp-processing"
-        compressed_blob_path = f"compressed/{job_id}.mp4"
-        comp_blob = storage_client.bucket(temp_bucket_name).blob(compressed_blob_path)
-        if comp_blob.exists():
-            compressed_uri = f"gs://{temp_bucket_name}/{compressed_blob_path}"
-            logger.info(f"Job {job_id}: Using compressed lightweight video ({compressed_uri}) for rendering.")
-            video_uri = compressed_uri
-    except Exception as comp_err:
-        logger.warning(f"Job {job_id}: Could not check compressed video existence: {comp_err}")
-
-    # Fallback to raw video bucket if video_uri is still missing
+    # Verify video_uri exists or fallback to raw video bucket
     if not video_uri:
         try:
             raw_bucket_name = f"{project_id}-raw-videos"
@@ -264,21 +288,39 @@ def _main(span):
         music_idx = None
         
     filters = []
+    video_in = "[0:v]"
     video_map = "0:v"
     audio_map = "0:a"
     
     # 1. Aspect Ratio Cropping
     if aspect_ratio == "9:16":
-        filters.append("[0:v]crop=ih*9/16:ih[vcrop]")
+        filters.append(f"{video_in}crop=ih*9/16:ih[vcrop]")
+        video_in = "[vcrop]"
         video_map = "[vcrop]"
     elif aspect_ratio == "1:1":
-        filters.append("[0:v]crop=ih:ih[vcrop]")
+        filters.append(f"{video_in}crop=ih:ih[vcrop]")
+        video_in = "[vcrop]"
         video_map = "[vcrop]"
     
     # 2. Subtitles
-    if tmp_srt:
-        filters.append(f"{video_map}subtitles={tmp_srt}[vout]")
+    enable_subtitles = payload.get('enableSubtitles')
+    if enable_subtitles is None:
+        enable_subtitles = payload.get('enable_subtitles')
+    if enable_subtitles is None and 'cfg' in locals() and cfg:
+        enable_subtitles = cfg.get('enableSubtitles') or cfg.get('enable_subtitles')
+
+    if isinstance(enable_subtitles, str):
+        enable_subtitles = enable_subtitles.lower() in ('true', '1', 'yes')
+    else:
+        enable_subtitles = bool(enable_subtitles)
+
+    if tmp_srt and enable_subtitles:
+        logger.info(f"Job {job_id}: Subtitles enabled. Burning subtitles from {tmp_srt}.")
+        filters.append(f"{video_in}subtitles={tmp_srt}[vout]")
+        video_in = "[vout]"
         video_map = "[vout]"
+    else:
+        logger.info(f"Job {job_id}: Subtitles disabled or missing (enable_subtitles={enable_subtitles}). Skipping subtitle overlay.")
         
     # Audio Mixing Logic
     mix_inputs = []

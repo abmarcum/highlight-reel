@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
-import { Trash2, RefreshCw, PlayCircle, Loader2, Copy, Check } from 'lucide-react';
+import { Trash2, RefreshCw, PlayCircle, Loader2, Copy, Check, Activity, ExternalLink } from 'lucide-react';
 
 const VideoPlayer = ({ jobId, apiUrl, title }) => {
   const [videoUrl, setVideoUrl] = useState(null);
@@ -71,23 +71,25 @@ const VideoPlayer = ({ jobId, apiUrl, title }) => {
   );
 };
 
-const LogsViewer = ({ jobId, apiUrl }) => {
+const LogsViewer = ({ jobId, apiUrl, reel }) => {
   const [logs, setLogs] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [copied, setCopied] = useState(false);
 
-  const handleCopy = (e) => {
-    if (e) e.stopPropagation();
-    const text = logs.map(log => `[${log.severity}] ${new Date(log.timestamp).toLocaleTimeString()} ${log.message}`).join('\n');
+  const config = reel?.config ? (typeof reel.config === 'string' ? JSON.parse(reel.config) : reel.config) : {};
+  const traceUrl = reel?.trace_url || config?.trace_url || (config?.trace_id ? `https://console.cloud.google.com/traces/explorer?tid=${config.trace_id}` : `https://console.cloud.google.com/traces/explorer`);
+
+  const handleCopy = () => {
+    const text = logs.map(l => `[${l.severity}] ${new Date(l.timestamp).toLocaleTimeString()} ${l.message}`).join('\n');
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const fetchLogs = (e) => {
-    if (e) e.stopPropagation();
+  const fetchLogs = () => {
     setLoading(true);
+    setError(null);
     fetch(`${apiUrl}/${jobId}/logs`)
       .then(res => {
         if (!res.ok) throw new Error("Failed to load logs");
@@ -111,8 +113,21 @@ const LogsViewer = ({ jobId, apiUrl }) => {
     <div style={{ marginTop: '1rem' }} onClick={(e) => e.stopPropagation()}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
         <h4 style={{ margin: '0', color: 'var(--primary)' }}>Live Logs</h4>
-        <div>
-          <button onClick={handleCopy} className="btn-icon" title="Copy Logs" disabled={logs.length === 0} style={{ marginRight: '0.5rem' }}>
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+          <a 
+            href={traceUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="btn-icon"
+            title="View Trace in Google Cloud Console"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', color: '#8087ff', fontSize: '0.8rem', padding: '0.35rem 0.65rem', border: '1px solid rgba(128, 135, 255, 0.4)', borderRadius: '6px', textDecoration: 'none', background: 'rgba(128, 135, 255, 0.08)' }}
+          >
+            <Activity size={15} />
+            <span style={{ fontWeight: 500 }}>Trace</span>
+            <ExternalLink size={12} style={{ opacity: 0.7 }} />
+          </a>
+          <button onClick={handleCopy} className="btn-icon" title="Copy Logs" disabled={logs.length === 0}>
             {copied ? <Check size={16} color="#4ade80" /> : <Copy size={16} />}
           </button>
           <button onClick={fetchLogs} className="btn-icon" title="Refresh Logs" disabled={loading}>
@@ -149,6 +164,7 @@ const JobSettingsEditor = ({ reel, apiUrl, onUpdate }) => {
     analysisMode: config.analysisMode || 'audio',
     aspectRatio: config.aspectRatio || '16:9',
     dualVoices: !!config.dualVoices,
+    enableSubtitles: !!(config.enableSubtitles || config.enable_subtitles),
     length: config.length || '60',
     musicTrack: config.musicTrack || 'electronic',
     teamPlayerBias: config.teamPlayerBias || ''
@@ -230,9 +246,14 @@ const JobSettingsEditor = ({ reel, apiUrl, onUpdate }) => {
         </div>
       </div>
 
-      <div className="checkbox-group" style={{ marginTop: '0.75rem', marginBottom: '1rem' }}>
+      <div className="checkbox-group" style={{ marginTop: '0.75rem', marginBottom: '0.5rem' }}>
         <input type="checkbox" id={`dualVoices_${reel.id}`} name="dualVoices" checked={settings.dualVoices} onChange={handleChange} />
         <label htmlFor={`dualVoices_${reel.id}`} style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-light)' }}>Enable Dual Voices (Play-by-play & Color)</label>
+      </div>
+
+      <div className="checkbox-group" style={{ marginTop: '0.5rem', marginBottom: '1rem' }}>
+        <input type="checkbox" id={`enableSubtitles_${reel.id}`} name="enableSubtitles" checked={settings.enableSubtitles} onChange={handleChange} />
+        <label htmlFor={`enableSubtitles_${reel.id}`} style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-light)' }}>Display Subtitles on Video</label>
       </div>
 
       <button onClick={handleSave} disabled={saving} className="btn-primary" style={{ padding: '0.4rem 1rem', fontSize: '0.85rem', cursor: 'pointer' }}>
@@ -244,7 +265,13 @@ const JobSettingsEditor = ({ reel, apiUrl, onUpdate }) => {
 
 const HighlightTimeline = ({ reel }) => {
   const config = reel.config ? JSON.parse(reel.config) : {};
-  const segments = config.selectedSegments || [
+  let rawSegments = config.final_script || config.finalScript || config.selectedSegments || config.script || config.segments;
+  
+  if (typeof rawSegments === 'string') {
+    try { rawSegments = JSON.parse(rawSegments); } catch { rawSegments = null; }
+  }
+
+  const segments = Array.isArray(rawSegments) ? rawSegments : [
     { start: '00:00', end: '00:15', text: 'Game opening commentary & team introduction' },
     { start: '00:15', end: '00:35', text: 'Key highlight play & player feature' },
     { start: '00:35', end: '00:60', text: 'Final score summary & game conclusion' }
@@ -434,19 +461,23 @@ const Dashboard = ({ userRole }) => {
                   )}
                   <div className="job-config-grid">
                     {Object.entries(config).map(([key, value]) => {
-                      if (key === 'jobId') return null;
+                      if (['jobId', 'selectedSegments', 'final_script', 'finalScript', 'draft_script', 'draftScript', 'script', 'segments', 'audioUris', 'audio_uris', 'original_payload', 'originalPayload', 'srtUri', 'srt_uri'].includes(key)) return null;
                       
                       // Format key (e.g. "musicTrack" -> "Music Track")
                       const formattedKey = key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
                       
                       // Format value
-                      let formattedValue = String(value);
+                      let formattedValue = '';
                       if (typeof value === 'boolean') {
                         formattedValue = value ? 'Yes' : 'No';
+                      } else if (typeof value === 'object' && value !== null) {
+                        formattedValue = JSON.stringify(value);
                       } else if (!value) {
                         formattedValue = 'None';
                       } else if (key === 'youtubeUrl' && value) {
                         formattedValue = <a href={value} target="_blank" rel="noopener noreferrer" style={{color: 'var(--primary)', textDecoration: 'underline'}}>{value}</a>;
+                      } else {
+                        formattedValue = String(value);
                       }
 
                       return (
@@ -469,7 +500,7 @@ const Dashboard = ({ userRole }) => {
                       <strong>Error:</strong> {reel.error_message}
                     </div>
                   )}
-                  <LogsViewer jobId={reel.id} apiUrl={import.meta.env.VITE_API_URL} />
+                  <LogsViewer jobId={reel.id} apiUrl={import.meta.env.VITE_API_URL} reel={reel} />
                 </div>
               )}
             </div>

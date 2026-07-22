@@ -13,16 +13,21 @@ from google.cloud import bigquery
 from google.cloud import pubsub_v1
 
 import google.cloud.logging
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
+try:
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
 
-provider = TracerProvider()
-cloud_trace_exporter = CloudTraceSpanExporter()
-provider.add_span_processor(BatchSpanProcessor(cloud_trace_exporter))
-trace.set_tracer_provider(provider)
-tracer = trace.get_tracer(__name__)
+    provider = TracerProvider()
+    cloud_trace_exporter = CloudTraceSpanExporter()
+    provider.add_span_processor(BatchSpanProcessor(cloud_trace_exporter))
+    trace.set_tracer_provider(provider)
+    tracer = trace.get_tracer(__name__)
+except Exception as otel_err:
+    print(f"OpenTelemetry initialization warning: {otel_err}")
+    from opentelemetry import trace
+    tracer = trace.get_tracer(__name__)
 
 try:
     logging_client = google.cloud.logging.Client()
@@ -105,9 +110,41 @@ def call_genai_with_retry(client, model_name, contents, config, max_retries=5):
             else:
                 raise e
 
+import random
+from opentelemetry.trace import SpanContext, TraceFlags
+
+def extract_parent_context(trace_id_str: str, parent_span_id_str: str = None):
+    if trace_id_str and len(trace_id_str) == 32:
+        try:
+            trace_id_int = int(trace_id_str, 16)
+            span_id_int = int(parent_span_id_str, 16) if parent_span_id_str and len(parent_span_id_str) == 16 else random.getrandbits(64)
+            span_context = SpanContext(
+                trace_id=trace_id_int,
+                span_id=span_id_int,
+                is_remote=True,
+                trace_flags=TraceFlags(0x01)
+            )
+            return trace.set_span_in_context(trace.NonRecordingSpan(span_context))
+        except Exception:
+            pass
+    return None
+
 @functions_framework.cloud_event
 def review_script(cloud_event: CloudEvent) -> None:
-    with tracer.start_as_current_span("producer-process") as span:
+    trace_id = None
+    span_id = None
+    try:
+        data = cloud_event.data or {}
+        msg = data.get("message", {})
+        if "data" in msg:
+            dec = json.loads(base64.b64decode(msg["data"]).decode("utf-8"))
+            trace_id = dec.get("trace_id")
+            span_id = dec.get("span_id")
+    except Exception:
+        pass
+
+    parent_ctx = extract_parent_context(trace_id, span_id)
+    with tracer.start_as_current_span("producer-process", context=parent_ctx) as span:
         span.set_attribute("event_id", str(cloud_event.get("id", "unknown")))
         return _review_script(cloud_event, span)
 
@@ -156,12 +193,12 @@ def _review_script(cloud_event: CloudEvent, span) -> None:
             f"Target Tone: {tone}\n"
             f"Target Bias/Focus: {bias}\n"
             f"Target Total Clip Length: {length_sec} seconds\n\n"
-            f"Instructions:\n"
-            f"1. Evaluate if the script matches the target tone and bias perfectly.\n"
-            f"2. If it is dull or hallucinates, rewrite it to be better, more exciting, and accurately paced.\n"
-            f"3. CRITICAL LENGTH & PACING RULE: The sum of (end_time - start_time) across all clips MUST equal {length_sec} seconds. Ensure the commentary text for each segment has approx 2 words per second of clip duration so the speaker finishes before the clip cuts.\n"
-            f"4. Do NOT insert or reference any B-roll, alternative angles, or video sources outside of the specific timestamps provided.\n"
-            f"5. Ensure the output is a JSON list of objects, where each object has 'text', 'start_time', and 'end_time'."
+            f"CRITICAL TIMING & RELEVANCE INSTRUCTIONS:\n"
+            f"1. PRESERVE VIDEO TIMESTAMPS: The `start_time` and `end_time` values in the draft script represent actual visual plays extracted from the source video. You MUST keep these start_time and end_time values unchanged (or trim slightly if needed), so the video clips cut by FFmpeg match the action.\n"
+            f"2. MATCH COMMENTARY TO THE PLAY: Rewrite the commentary `text` for each segment so it describes the EXACT play happening in that specific timestamp range with high energy and relevance to '{bias}'.\n"
+            f"3. STRICT WORD PACING: The commentary text length MUST match the duration (end_time - start_time) of each clip. Write approximately 2 to 2.3 words per second of clip duration (e.g., a 6-second clip needs 12-14 words max) so the voiceover completes before the video clip cuts to the next play.\n"
+            f"4. Do NOT invent new timestamps or reference out-of-bounds video content.\n"
+            f"5. Ensure the output is a JSON list of objects: `text`, `start_time`, and `end_time`."
         )
         
         response = call_genai_with_retry(

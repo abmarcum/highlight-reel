@@ -27,6 +27,7 @@ ENV/
 *.tfstate
 *.tfstate.backup
 *.tfvars
+!*.tfvars.example
 *.tfvars.json
 override.tf
 override.tf.json

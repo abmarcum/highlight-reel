@@ -13,16 +13,21 @@ from google.cloud import run_v2
 
 import logging
 import google.cloud.logging
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
+try:
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
 
-provider = TracerProvider()
-cloud_trace_exporter = CloudTraceSpanExporter()
-provider.add_span_processor(BatchSpanProcessor(cloud_trace_exporter))
-trace.set_tracer_provider(provider)
-tracer = trace.get_tracer(__name__)
+    provider = TracerProvider()
+    cloud_trace_exporter = CloudTraceSpanExporter()
+    provider.add_span_processor(BatchSpanProcessor(cloud_trace_exporter))
+    trace.set_tracer_provider(provider)
+    tracer = trace.get_tracer(__name__)
+except Exception as otel_err:
+    print(f"OpenTelemetry initialization warning: {otel_err}")
+    from opentelemetry import trace
+    tracer = trace.get_tracer(__name__)
 
 try:
     logging_client = google.cloud.logging.Client()
@@ -92,12 +97,44 @@ def write_error_to_bq(job_id, error_message):
     except Exception as e:
         logger.error(f"Failed to write error to BigQuery: {e}")
 
+import random
+from opentelemetry.trace import SpanContext, TraceFlags
+
+def extract_parent_context(trace_id_str: str, parent_span_id_str: str = None):
+    if trace_id_str and len(trace_id_str) == 32:
+        try:
+            trace_id_int = int(trace_id_str, 16)
+            span_id_int = int(parent_span_id_str, 16) if parent_span_id_str and len(parent_span_id_str) == 16 else random.getrandbits(64)
+            span_context = SpanContext(
+                trace_id=trace_id_int,
+                span_id=span_id_int,
+                is_remote=True,
+                trace_flags=TraceFlags(0x01)
+            )
+            return trace.set_span_in_context(trace.NonRecordingSpan(span_context))
+        except Exception:
+            pass
+    return None
+
 @functions_framework.cloud_event
 def generate_audio(cloud_event):
     """
     Cloud Function triggered by Pub/Sub to generate audio commentary and SRT subtitles.
     """
-    with tracer.start_as_current_span("audio_gen-process") as span:
+    trace_id = None
+    span_id = None
+    try:
+        data = cloud_event.data or {}
+        msg = data.get("message", {})
+        if "data" in msg:
+            dec = json.loads(base64.b64decode(msg["data"]).decode("utf-8"))
+            trace_id = dec.get("trace_id")
+            span_id = dec.get("span_id")
+    except Exception:
+        pass
+
+    parent_ctx = extract_parent_context(trace_id, span_id)
+    with tracer.start_as_current_span("audio_gen-process", context=parent_ctx) as span:
         return _generate_audio(cloud_event, span)
 
 def _generate_audio(cloud_event, span):

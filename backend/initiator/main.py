@@ -10,16 +10,21 @@ from google.cloud import storage
 from google.cloud import bigquery
 
 import google.cloud.logging
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
+try:
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
 
-provider = TracerProvider()
-cloud_trace_exporter = CloudTraceSpanExporter()
-provider.add_span_processor(BatchSpanProcessor(cloud_trace_exporter))
-trace.set_tracer_provider(provider)
-tracer = trace.get_tracer(__name__)
+    provider = TracerProvider()
+    cloud_trace_exporter = CloudTraceSpanExporter()
+    provider.add_span_processor(BatchSpanProcessor(cloud_trace_exporter))
+    trace.set_tracer_provider(provider)
+    tracer = trace.get_tracer(__name__)
+except Exception as otel_err:
+    print(f"OpenTelemetry initialization warning: {otel_err}")
+    from opentelemetry import trace
+    tracer = trace.get_tracer(__name__)
 
 try:
     logging_client = google.cloud.logging.Client()
@@ -81,15 +86,51 @@ def write_error_to_bq(job_id, error_message):
     except Exception as e:
         logger.error(f"Failed to write error to BigQuery: {e}")
 
+import random
+from opentelemetry.trace import SpanContext, TraceFlags
+
+def extract_parent_context(trace_id_str: str, parent_span_id_str: str = None):
+    if trace_id_str and len(trace_id_str) == 32:
+        try:
+            trace_id_int = int(trace_id_str, 16)
+            span_id_int = int(parent_span_id_str, 16) if parent_span_id_str and len(parent_span_id_str) == 16 else random.getrandbits(64)
+            span_context = SpanContext(
+                trace_id=trace_id_int,
+                span_id=span_id_int,
+                is_remote=True,
+                trace_flags=TraceFlags(0x01)
+            )
+            return trace.set_span_in_context(trace.NonRecordingSpan(span_context))
+        except Exception:
+            pass
+    return None
+
 @functions_framework.cloud_event
 def process_job(cloud_event: CloudEvent):
     """Triggered by a change to a Cloud Storage bucket.
     Reads a .job file, constructs missing configuration, and publishes to Pub/Sub.
     """
-    with tracer.start_as_current_span("initiator-process") as span:
-        data = cloud_event.data
-        span.set_attribute("bucket", str(data.get("bucket", "")))
-        span.set_attribute("file_name", str(data.get("name", "")))
+    data = cloud_event.data or {}
+    file_name = data.get("name", "")
+    bucket_name = data.get("bucket", "")
+    trace_id = None
+    span_id = None
+    if file_name.endswith('.job'):
+        try:
+            st_client = get_storage_client()
+            bkt = st_client.bucket(bucket_name)
+            blb = bkt.blob(file_name)
+            c_str = blb.download_as_string()
+            c_json = json.loads(c_str)
+            trace_id = c_json.get("trace_id")
+            span_id = c_json.get("span_id")
+        except Exception:
+            pass
+
+    parent_ctx = extract_parent_context(trace_id, span_id)
+    with tracer.start_as_current_span("initiator-process", context=parent_ctx) as span:
+        span.set_attribute("bucket", str(bucket_name))
+        span.set_attribute("file_name", str(file_name))
         return _process_job(cloud_event, span)
 
 def _process_job(cloud_event: CloudEvent, span):
@@ -174,11 +215,44 @@ def _process_job(cloud_event: CloudEvent, span):
             os.remove(tmp_video_path)
 
         elif not video_gcs_uri:
-            # Replace .job with .mp4 (Fallback behavior)
-            video_name = file_name[:-4] + ".mp4"
-            video_gcs_uri = f"gs://{bucket_name}/{video_name}"
+            job_id = job_config.get("jobId") or file_name[:-4]
+            # Search BigQuery job config for video_gcs_uri
+            try:
+                bq_client = bigquery.Client()
+                project_id_bq = os.environ.get("PROJECT_ID", bq_client.project)
+                query = f"SELECT config FROM `{project_id_bq}.highlight_reel_analytics.jobs` WHERE job_id = @job_id LIMIT 1"
+                job_config_select = bigquery.QueryJobConfig(
+                    query_parameters=[bigquery.ScalarQueryParameter("job_id", "STRING", str(job_id))]
+                )
+                results = list(bq_client.query(query, job_config=job_config_select).result())
+                if results and results[0].config:
+                    cfg_data = json.loads(results[0].config) if isinstance(results[0].config, str) else results[0].config
+                    video_gcs_uri = cfg_data.get("video_gcs_uri") or cfg_data.get("videoUri") or cfg_data.get("video_uri")
+            except Exception as bq_err:
+                logger.warning(f"Could not fetch video_gcs_uri from BigQuery for {job_id}: {bq_err}")
+
+            if not video_gcs_uri:
+                # Check if file exists under uploads/
+                uploads_blob = bucket.blob(f"uploads/{job_id}.mp4")
+                if not uploads_blob.exists():
+                    try:
+                        upload_blobs = list(bucket.list_blobs(prefix="uploads/"))
+                        mp4_blobs = [b for b in upload_blobs if b.name.endswith(".mp4")]
+                        if mp4_blobs:
+                            mp4_blobs.sort(key=lambda x: x.updated, reverse=True)
+                            uploads_blob = mp4_blobs[0]
+                            logger.info(f"Job {job_id}: Discovered fallback video in uploads/: {uploads_blob.name}")
+                    except Exception as list_err:
+                        logger.warning(f"Could not list uploads/ directory: {list_err}")
+
+                if uploads_blob and uploads_blob.exists():
+                    video_gcs_uri = f"gs://{bucket_name}/{uploads_blob.name}"
+                else:
+                    video_name = file_name[:-4] + ".mp4"
+                    video_gcs_uri = f"gs://{bucket_name}/{video_name}"
+            
             job_config["video_gcs_uri"] = video_gcs_uri
-            logger.info(f"Constructed video_gcs_uri: {video_gcs_uri}")
+            logger.info(f"Resolved video_gcs_uri: {video_gcs_uri}")
 
         # Publish to Pub/Sub
         publisher = get_publisher_client()

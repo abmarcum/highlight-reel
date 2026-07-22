@@ -13,16 +13,21 @@ from google.cloud import storage
 import time
 import subprocess
 import glob
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
+try:
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
 
-provider = TracerProvider()
-cloud_trace_exporter = CloudTraceSpanExporter()
-provider.add_span_processor(BatchSpanProcessor(cloud_trace_exporter))
-trace.set_tracer_provider(provider)
-tracer = trace.get_tracer(__name__)
+    provider = TracerProvider()
+    cloud_trace_exporter = CloudTraceSpanExporter()
+    provider.add_span_processor(BatchSpanProcessor(cloud_trace_exporter))
+    trace.set_tracer_provider(provider)
+    tracer = trace.get_tracer(__name__)
+except Exception as otel_err:
+    print(f"OpenTelemetry initialization warning: {otel_err}")
+    from opentelemetry import trace
+    tracer = trace.get_tracer(__name__)
 
 try:
     logging_client = google.cloud.logging.Client()
@@ -105,12 +110,44 @@ def call_genai_with_retry(client, model_name, contents, config, max_retries=5):
             else:
                 raise e
 
+import random
+from opentelemetry.trace import SpanContext, TraceFlags
+
+def extract_parent_context(trace_id_str: str, parent_span_id_str: str = None):
+    if trace_id_str and len(trace_id_str) == 32:
+        try:
+            trace_id_int = int(trace_id_str, 16)
+            span_id_int = int(parent_span_id_str, 16) if parent_span_id_str and len(parent_span_id_str) == 16 else random.getrandbits(64)
+            span_context = SpanContext(
+                trace_id=trace_id_int,
+                span_id=span_id_int,
+                is_remote=True,
+                trace_flags=TraceFlags(0x01)
+            )
+            return trace.set_span_in_context(trace.NonRecordingSpan(span_context))
+        except Exception:
+            pass
+    return None
+
 @functions_framework.cloud_event
 def analyze_video(cloud_event: CloudEvent) -> None:
     """
     CloudEvent trigger for analyzing a sports video with Gemini Developer API.
     """
-    with tracer.start_as_current_span("analyzer-process") as span:
+    trace_id = None
+    span_id = None
+    try:
+        data = cloud_event.data or {}
+        msg = data.get("message", {})
+        if "data" in msg:
+            dec = json.loads(base64.b64decode(msg["data"]).decode("utf-8"))
+            trace_id = dec.get("trace_id")
+            span_id = dec.get("span_id")
+    except Exception:
+        pass
+
+    parent_ctx = extract_parent_context(trace_id, span_id)
+    with tracer.start_as_current_span("analyzer-process", context=parent_ctx) as span:
         span.set_attribute("event_id", str(cloud_event.get("id", "unknown")))
         return _analyze_video(cloud_event, span)
 
@@ -206,28 +243,28 @@ def _analyze_video(cloud_event: CloudEvent, span) -> None:
         if analysis_mode == "audio":
             prompt = (
                 f"{persona}\n\n"
-                f"Listen closely to the game audio (crowd noise, announcer excitement, whistles, bat cracks) to provide insight into important key plays related to: '{team_player_bias}'.\n"
-                f"Generate a short sports commentary script in a '{tone}' tone for the top highlights. CRITICAL DURATION REQUIREMENT: The total combined duration of all clip segments (sum of end_time - start_time) MUST equal EXACTLY {length_sec} seconds.\n"
-                f"The commentary script must be written entirely in the following language code: '{language}'.\n"
-                f"Important instructions for the script format:\n"
-                f"1. Have the highlight reel start off by describing the game but do not include the outcome at first.\n"
-                f"2. Explain the key plays and discuss them lightly based on what you hear. You MUST ensure that the commentary matches exactly what is happening in the specific video clip (timestamp range) being shown.\n"
-                f"3. End with a summary of the top players and the outcome.\n"
-                f"4. Do NOT insert or reference any B-roll, alternative angles, or video sources outside of this specific provided video file.\n"
-                f"5. Output must be a structured list of objects. Each object must contain 'start_time' and 'end_time' (in seconds) for the video clip, and the 'text' (commentary) that corresponds EXACTLY to that timestamp range. Total duration must equal {length_sec} seconds."
+                f"Analyze the sports game audio (crowd roar, announcer excitement, whistles, bat cracks, shoes squeaking) to identify the most thrilling, high-action key plays related to '{team_player_bias}'.\n"
+                f"Generate a sports commentary script in a '{tone}' tone. Total combined duration of all clip segments (sum of end_time - start_time) MUST equal EXACTLY {length_sec} seconds.\n"
+                f"Language requirement: Output commentary text in language code '{language}'.\n\n"
+                f"CRITICAL TIMESTAMP & RELEVANCE RULES:\n"
+                f"1. ACCURATE PLAY TIMESTAMPS: Identify the exact start_time (1-2 seconds before the action) and end_time (after the play concludes) for each major play heard in the audio.\n"
+                f"2. MATCH COMMENTARY TO ACTION: The commentary `text` for each segment MUST describe the EXACT play occurring within that segment's `[start_time, end_time]` timestamp window.\n"
+                f"3. PACING & WORD COUNT: Write approximately 2 words per second of duration for each clip so the commentary finishes before the clip cuts.\n"
+                f"4. NO OUT-OF-BOUNDS REFERENCES: Do not mention B-roll or external plays outside this source media.\n"
+                f"5. Output format MUST be a JSON array of objects: `text`, `start_time`, `end_time`."
             )
         else:
             prompt = (
                 f"{persona}\n\n"
-                f"Listen closely to the game audio and watch the video to provide deep insight into important key plays related to: '{team_player_bias}'.\n"
-                f"Generate a short sports commentary script in a '{tone}' tone for the top highlights. CRITICAL DURATION REQUIREMENT: The total combined duration of all clip segments (sum of end_time - start_time) MUST equal EXACTLY {length_sec} seconds.\n"
-                f"The commentary script must be written entirely in the following language code: '{language}'.\n"
-                f"Important instructions for the script format:\n"
-                f"1. Have the highlight reel start off by describing the game but do not include the outcome at first.\n"
-                f"2. Explain the key plays and discuss them lightly based on what you hear and see. You MUST ensure that the commentary matches exactly what is happening in the specific video clip (timestamp range) being shown.\n"
-                f"3. End with a summary of the top players and the outcome.\n"
-                f"4. Do NOT insert or reference any B-roll, alternative angles, or video sources outside of this specific provided video file.\n"
-                f"5. Output must be a structured list of objects. Each object must contain 'start_time' and 'end_time' (in seconds) for the video clip, and the 'text' (commentary) that corresponds EXACTLY to that timestamp range. Total duration must equal {length_sec} seconds."
+                f"Analyze the video and audio to locate the most exciting, high-impact key plays (goals, dunks, steals, home runs, touchdowns, big hits, key saves) related to '{team_player_bias}'.\n"
+                f"Generate a sports commentary script in a '{tone}' tone. Total combined duration of all clip segments (sum of end_time - start_time) MUST equal EXACTLY {length_sec} seconds.\n"
+                f"Language requirement: Output commentary text in language code '{language}'.\n\n"
+                f"CRITICAL TIMESTAMP & RELEVANCE RULES:\n"
+                f"1. ACCURATE VISUAL TIMESTAMPS: Identify the precise start_time (just as the play begins) and end_time (as the reaction finishes) for each visual highlight in the video.\n"
+                f"2. MATCH COMMENTARY TO ACTION: The commentary `text` for each segment MUST describe the EXACT play happening on screen during that segment's `[start_time, end_time]` timestamp window.\n"
+                f"3. PACING & WORD COUNT: Write approximately 2 words per second of duration for each clip so the commentary finishes before the clip cuts.\n"
+                f"4. NO OUT-OF-BOUNDS REFERENCES: Do not mention B-roll or external plays outside this source media.\n"
+                f"5. Output format MUST be a JSON array of objects: `text`, `start_time`, `end_time`."
             )
 
         temp_bucket_name = f"{project_id}-temp-processing"
@@ -243,12 +280,71 @@ def _analyze_video(cloud_event: CloudEvent, span) -> None:
         tmp_media_path = None
 
         if use_vertex:
-            logger.info(f"Job {job_id}: Downloading video from GCS for token-safe downsampling...")
-            storage_client = storage.Client()
-            bucket_name = video_gcs_uri.split("/")[2]
-            blob_name = "/".join(video_gcs_uri.split("/")[3:])
-            bucket = storage_client.bucket(bucket_name)
-            blob = bucket.blob(blob_name)
+            cached_compressed_blob = temp_bucket.blob(f"compressed/{job_id}.mp4") if temp_bucket else None
+            if cached_compressed_blob and cached_compressed_blob.exists():
+                logger.info(f"Job {job_id}: Found existing token-optimized media in GCS (gs://{temp_bucket_name}/compressed/{job_id}.mp4). Reusing cached media to skip download & downsampling!")
+                compressed_gcs_uri = f"gs://{temp_bucket_name}/compressed/{job_id}.mp4"
+                mime_type = "video/mp4"
+                media_part = types.Part.from_uri(file_uri=compressed_gcs_uri, mime_type=mime_type)
+                logger.info(f"Job {job_id}: Asking Vertex AI ({model_name}) to analyze media ({compressed_gcs_uri})...")
+                script_response = call_genai_with_retry(
+                    client=client,
+                    model_name=model_name,
+                    contents=[media_part, prompt],
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+            else:
+                logger.info(f"Job {job_id}: Downloading video from GCS for token-safe downsampling...")
+                storage_client = storage.Client()
+                bucket_name = video_gcs_uri.split("/")[2]
+                blob_name = "/".join(video_gcs_uri.split("/")[3:])
+                bucket = storage_client.bucket(bucket_name)
+                blob = bucket.blob(blob_name)
+
+            if not blob.exists():
+                logger.warning(f"Job {job_id}: Blob {video_gcs_uri} does not exist directly. Searching fallback GCS locations...")
+                try:
+                    bq_client = bigquery.Client()
+                    project_id_bq = os.environ.get("PROJECT_ID", bq_client.project)
+                    query = f"SELECT config FROM `{project_id_bq}.highlight_reel_analytics.jobs` WHERE job_id = @job_id LIMIT 1"
+                    job_config_select = bigquery.QueryJobConfig(
+                        query_parameters=[bigquery.ScalarQueryParameter("job_id", "STRING", str(job_id))]
+                    )
+                    res_bq = list(bq_client.query(query, job_config=job_config_select).result())
+                    if res_bq and res_bq[0].config:
+                        cfg_bq = json.loads(res_bq[0].config) if isinstance(res_bq[0].config, str) else res_bq[0].config
+                        alt_uri = cfg_bq.get("video_gcs_uri") or cfg_bq.get("videoUri") or cfg_bq.get("video_uri")
+                        if alt_uri and alt_uri != video_gcs_uri:
+                            video_gcs_uri = alt_uri
+                            bucket_name = video_gcs_uri.split("/")[2]
+                            blob_name = "/".join(video_gcs_uri.split("/")[3:])
+                            bucket = storage_client.bucket(bucket_name)
+                            blob = bucket.blob(blob_name)
+                except Exception as search_err:
+                    logger.warning(f"Fallback search failed: {search_err}")
+
+            if not blob.exists():
+                alt_blob = bucket.blob(f"uploads/{job_id}.mp4")
+                if not alt_blob.exists():
+                    try:
+                        upload_blobs = list(bucket.list_blobs(prefix="uploads/"))
+                        mp4_blobs = [b for b in upload_blobs if b.name.endswith(".mp4")]
+                        if mp4_blobs:
+                            mp4_blobs.sort(key=lambda x: x.updated, reverse=True)
+                            alt_blob = mp4_blobs[0]
+                            logger.info(f"Job {job_id}: Discovered fallback video in uploads/: {alt_blob.name}")
+                    except Exception as list_err:
+                        logger.warning(f"Could not list uploads/ directory: {list_err}")
+
+                if alt_blob and alt_blob.exists():
+                    blob = alt_blob
+                    video_gcs_uri = f"gs://{bucket_name}/{alt_blob.name}"
+                else:
+                    err_msg = f"Source video file not found in GCS bucket: {video_gcs_uri}"
+                    logger.error(err_msg)
+                    write_error_to_bq(job_id, err_msg)
+                    return
+
             blob.download_to_filename(tmp_video_path)
 
             if analysis_mode == "audio":

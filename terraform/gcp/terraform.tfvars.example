@@ -1,0 +1,17 @@
+# GCP Infrastructure Configuration Example
+# Copy this file to terraform.tfvars and fill in your actual values before running terraform apply.
+# WARNING: Do NOT commit your actual terraform.tfvars file containing real credentials to Git!
+
+project_id        = "your-gcp-project-id"
+region            = "us-central1"
+env               = "dev"
+
+# Domain & Identity-Aware Proxy (IAP) Configuration
+iap_domain        = "highlight-reel.yourdomain.com"
+iap_client_id     = "YOUR_OAUTH_CLIENT_ID.apps.googleusercontent.com"
+iap_client_secret = "YOUR_OAUTH_CLIENT_SECRET"
+
+# Application Credentials & Secret Manager Secrets
+gemini_api_key    = "YOUR_GEMINI_API_KEY"
+slack_webhook_url = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+proxy_pass        = "YOUR_OPTIONAL_PROXY_PASSWORD"

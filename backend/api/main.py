@@ -11,16 +11,21 @@ from google.cloud import bigquery
 from google.cloud import storage
 
 import google.cloud.logging
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
+try:
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
 
-provider = TracerProvider()
-cloud_trace_exporter = CloudTraceSpanExporter()
-provider.add_span_processor(BatchSpanProcessor(cloud_trace_exporter))
-trace.set_tracer_provider(provider)
-tracer = trace.get_tracer(__name__)
+    provider = TracerProvider()
+    cloud_trace_exporter = CloudTraceSpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(cloud_trace_exporter))
+    trace.set_tracer_provider(provider)
+    tracer = trace.get_tracer(__name__)
+except Exception as otel_err:
+    print(f"OpenTelemetry initialization warning: {otel_err}")
+    from opentelemetry import trace
+    tracer = trace.get_tracer(__name__)
 
 try:
     logging_client = google.cloud.logging.Client()
@@ -154,6 +159,36 @@ def get_jobs(request):
                 logger.error(f"Error fetching storage stats: {e}")
                 return (jsonify({"error": str(e)}), 500, headers)
 
+        elif len(parts) == 2 and parts[0] == "storage" and parts[1] == "purge":
+            if user_role != "admin":
+                return (jsonify({"error": "Forbidden: Only admins can purge storage"}), 403, headers)
+
+            req_data = request.get_json() or {}
+            target_bucket_name = req_data.get("bucket")
+            if not target_bucket_name:
+                return (jsonify({"error": "Missing bucket parameter"}), 400, headers)
+
+            allowed_buckets = [
+                RAW_VIDEOS_BUCKET,
+                f"{PROJECT_ID}-temp-processing",
+                f"{PROJECT_ID}-processed-highlights"
+            ]
+            if target_bucket_name not in allowed_buckets:
+                return (jsonify({"error": f"Invalid bucket target: {target_bucket_name}"}), 400, headers)
+
+            try:
+                bucket = storage_client.bucket(target_bucket_name)
+                blobs = list(bucket.list_blobs())
+                deleted_count = 0
+                for b in blobs:
+                    b.delete()
+                    deleted_count += 1
+                logger.info(f"Admin {user_email} purged {deleted_count} files from bucket {target_bucket_name}")
+                return (jsonify({"message": f"Successfully purged {deleted_count} files from {target_bucket_name}", "deleted_count": deleted_count}), 200, headers)
+            except Exception as purge_err:
+                logger.error(f"Error purging bucket {target_bucket_name}: {purge_err}")
+                return (jsonify({"error": str(purge_err)}), 500, headers)
+
         elif len(parts) == 0:
             try:
                 query = f"""
@@ -167,12 +202,20 @@ def get_jobs(request):
 
                 jobs = []
                 for row in results:
+                    cfg = json.loads(row.config) if isinstance(row.config, str) else (row.config or {})
+                    t_id = cfg.get("trace_id") if isinstance(cfg, dict) else None
+                    t_url = cfg.get("trace_url") if isinstance(cfg, dict) else None
+                    if not t_url and t_id:
+                        t_url = f"https://console.cloud.google.com/traces/explorer?project={PROJECT_ID}&tid={t_id}"
+
                     jobs.append({
                         "id": row.job_id,
                         "status": row.status,
                         "created_at": row.created_at.isoformat() if row.created_at else None,
                         "config": row.config,
-                        "error_message": row.get("error_message")
+                        "error_message": row.get("error_message"),
+                        "trace_id": t_id,
+                        "trace_url": t_url
                     })
 
                 return (jsonify({"jobs": jobs}), 200, headers)
@@ -572,6 +615,34 @@ def get_jobs(request):
                 orig_filename = re.sub(r'\.[^/.]+$', '', str(orig_filename))
 
             job_id = str(uuid.uuid4())
+            cloud_trace_hdr = request.headers.get("X-Cloud-Trace-Context")
+            hdr_trace_id, hdr_span_id = None, None
+            if cloud_trace_hdr:
+                try:
+                    parts = cloud_trace_hdr.split("/")
+                    hdr_trace_id = parts[0]
+                    if len(parts) > 1:
+                        hdr_span_id = parts[1].split(";")[0]
+                except Exception:
+                    pass
+
+            current_span = trace.get_current_span()
+            if hdr_trace_id:
+                trace_id = hdr_trace_id
+            elif current_span and current_span.get_span_context().is_valid:
+                trace_id = format(current_span.get_span_context().trace_id, "032x")
+            else:
+                trace_id = uuid.uuid4().hex
+
+            if hdr_span_id:
+                span_id = hdr_span_id
+            elif current_span and current_span.get_span_context().is_valid:
+                span_id = format(current_span.get_span_context().span_id, "016x")
+            else:
+                span_id = None
+
+            trace_url = f"https://console.cloud.google.com/traces/explorer?project={PROJECT_ID}&tid={trace_id}"
+
             job_data = {
                 "jobId": job_id,
                 "originalFileName": sanitize(orig_filename),
@@ -587,7 +658,10 @@ def get_jobs(request):
                 "voice2": sanitize(req_data.get("voice2", "en-US-Journey-F")),
                 "dualVoices": req_data.get("dualVoices", False),
                 "analysisMode": sanitize(req_data.get("analysisMode", "video")),
-                "userEmail": user_email
+                "userEmail": user_email,
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "trace_url": trace_url
             }
             
             try:

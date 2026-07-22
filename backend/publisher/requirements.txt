@@ -6,3 +6,4 @@ google-cloud-logging>=3.8.0
 opentelemetry-api
 opentelemetry-sdk
 opentelemetry-exporter-gcp-trace
+opentelemetry-resourcedetector-gcp

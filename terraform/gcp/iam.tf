@@ -224,6 +224,12 @@ resource "google_project_iam_member" "renderer_bq_job" {
   member  = "serviceAccount:${google_service_account.renderer.email}"
 }
 
+resource "google_project_iam_member" "renderer_trace" {
+  project = var.project_id
+  role    = "roles/cloudtrace.agent"
+  member  = "serviceAccount:${google_service_account.renderer.email}"
+}
+
 # ---------------------------------------------------------
 # Publisher IAM
 # ---------------------------------------------------------
@@ -326,6 +332,24 @@ resource "google_project_iam_member" "api_logging_viewer" {
 resource "google_project_iam_member" "api_token_creator" {
   project = var.project_id
   role    = "roles/iam.serviceAccountTokenCreator"
+  member  = "serviceAccount:${google_service_account.api.email}"
+}
+
+resource "google_project_iam_member" "api_trace" {
+  project = var.project_id
+  role    = "roles/cloudtrace.agent"
+  member  = "serviceAccount:${google_service_account.api.email}"
+}
+
+resource "google_project_iam_member" "api_run_developer" {
+  project = var.project_id
+  role    = "roles/run.developer"
+  member  = "serviceAccount:${google_service_account.api.email}"
+}
+
+resource "google_project_iam_member" "api_pubsub_publisher" {
+  project = var.project_id
+  role    = "roles/pubsub.publisher"
   member  = "serviceAccount:${google_service_account.api.email}"
 }
 
